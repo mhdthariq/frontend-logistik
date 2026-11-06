@@ -1,0 +1,138 @@
+
+import { useApiData } from "@/hooks/use-api-data";
+import { Clock, History, Loader2, Package, RefreshCw } from "lucide-react";
+import { apiGetWithMeta, hasPermission, type AuditEntry, type AuditResponse } from "@/infrastructure/http/client-api";
+import { useAuth } from "@/hooks/use-auth";
+import { Button } from "@/components/ui/button";
+import { formatDate } from "@/components/app/form-parts";
+import { AuditDataViewer } from "@/components/app/audit-data-viewer";
+import { cn } from "@/shared/utils";
+
+const ACTION_STYLES: Record<string, string> = {
+  created: "bg-primary/10 text-primary",
+  updated: "bg-chart-4/15 text-chart-4",
+  deleted: "bg-destructive/10 text-destructive",
+  deactivated: "bg-destructive/10 text-destructive",
+  disabled: "bg-destructive/10 text-destructive",
+  login: "bg-muted text-muted-foreground",
+  logout: "bg-muted text-muted-foreground",
+  priced: "bg-chart-2/15 text-chart-2",
+  settled: "bg-primary/10 text-primary",
+  status_change: "bg-chart-3/15 text-chart-3",
+  cancelled: "bg-destructive/10 text-destructive",
+  change_password: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+  printed_resi: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+  printed_invoice: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+};
+
+/**
+ * Per-menu activity log: filters the global audit trail by entity type(s)
+ * so each menu has its own clear, separated history.
+ *
+ * Users WITHOUT audit_log.view (e.g. Marketing) would only ever see an
+ * empty/erroring panel — the API rejects them — so the panel renders nothing
+ * at all for them instead of a useless "Belum ada aktivitas" box.
+ */
+export function ActivityLogPanel({
+  entityTypes,
+  entityId,
+  title = "Log Aktivitas",
+  limit = 30,
+  compact = false,
+}: {
+  entityTypes: string[];
+  entityId?: number;
+  title?: string;
+  limit?: number;
+  compact?: boolean;
+}) {
+  const { user } = useAuth();
+  const canViewLog = hasPermission(user, "audit_log.view");
+  const query = entityTypes.map((type) => `entityType=${encodeURIComponent(type)}`).join("&");
+  const { data, loading, error, reload } = useApiData(
+    () => canViewLog
+      ? apiGetWithMeta<AuditResponse["data"]>(
+        `/audit-logs?${query}${entityId == null ? "" : `&entityId=${entityId}`}&limit=${limit}`,
+      )
+      : Promise.resolve(null),
+    [canViewLog, query, entityId, limit],
+  );
+  const entries = data?.data ?? [];
+  const total = typeof data?.meta?.total === "number" ? data.meta.total : entries.length;
+
+  // No audit_log.view → no log panel at all (never render an empty shell).
+  if (!canViewLog) return null;
+
+  return (
+    <div className="rounded-xl border bg-card">
+      <div className="flex items-center justify-between gap-2 border-b px-4 py-3">
+        <div className="flex items-center gap-2">
+          <History className="h-4 w-4 text-primary" />
+          <p className="text-sm font-semibold text-foreground">{title}</p>
+          {!loading && !error && (
+            <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+              {total} entri
+            </span>
+          )}
+        </div>
+        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => void reload()} aria-label="Muat ulang log">
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+        </Button>
+      </div>
+
+      <div className={cn("max-h-96 overflow-y-auto p-2", compact && "max-h-64")}>
+        {error ? (
+          <p className="px-3 py-6 text-center text-sm text-destructive">{error}</p>
+        ) : loading ? (
+          <div className="space-y-1 p-1">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="h-12 animate-pulse rounded-lg bg-muted/60" />
+            ))}
+          </div>
+        ) : entries.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 px-3 py-8 text-center">
+            <Package className="h-8 w-8 text-muted-foreground/40" />
+            <p className="text-sm text-muted-foreground">Belum ada aktivitas tercatat untuk menu ini.</p>
+          </div>
+        ) : (
+          <ol className="relative ml-3 space-y-0 border-l pl-4">
+            {entries.map((entry) => (
+              <li key={entry.id} className="relative pb-4 pt-1 last:pb-1">
+                <span className="absolute -left-5.25 top-1.5 flex h-2.5 w-2.5 rounded-full border-2 border-card bg-primary" />
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span
+                    className={cn(
+                      "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+                      ACTION_STYLES[entry.action] ?? "bg-muted text-muted-foreground",
+                    )}
+                  >
+                    {entry.action}
+                  </span>
+                  <span className="text-sm font-medium text-foreground">
+                    {entry.entityLabel ?? `${entry.entityType} #${entry.entityId ?? "?"}`}
+                  </span>
+                </div>
+                <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <Clock className="h-3 w-3" />
+                  {formatDate(entry.createdAt, true)}
+                  <span>·</span>
+                  <span>oleh {entry.actorName}</span>
+                </p>
+                {entry.afterData && Object.keys(entry.afterData).length > 0 && !compact && (
+                  <details className="mt-1">
+                    <summary className="cursor-pointer text-[11px] font-medium text-primary/80 hover:text-primary">
+                      Detail perubahan
+                    </summary>
+                    <div className="mt-1 rounded-lg bg-muted/40 p-2">
+                      <AuditDataViewer data={entry.afterData} variant="after" />
+                    </div>
+                  </details>
+                )}
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+    </div>
+  );
+}

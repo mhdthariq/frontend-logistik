@@ -1,0 +1,282 @@
+"use client"
+
+import * as React from "react"
+import * as DialogPrimitive from "@radix-ui/react-dialog"
+import { XIcon } from "lucide-react"
+
+import { cn } from "@/shared/utils"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+
+/**
+ * Unsaved-input guard (2026-10-01).
+ *
+ * Every Dialog now tracks whether the user typed / picked anything inside a
+ * <form> in its content. If they then dismiss it with Esc or the X button
+ * (or an outside click, for dialogs without a close button), we ask first
+ * instead of silently throwing their input away. Only DISMISS gestures are
+ * guarded: the explicit "Batal" button and the automatic close after a
+ * successful save call the parent's setState directly, so they never prompt.
+ * Dialogs without a form (details, confirmations) never prompt either.
+ */
+const DirtyContext = React.createContext<{ markDirty: () => void } | null>(
+    null,
+);
+
+function Dialog({
+  open,
+  defaultOpen,
+  onOpenChange,
+  confirmOnClose = true,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Root> & {
+  /** Ask before closing when the user has typed something. Default true. */
+  confirmOnClose?: boolean
+}) {
+  const isControlled = open !== undefined
+  const [innerOpen, setInnerOpen] = React.useState(defaultOpen ?? false)
+  const effectiveOpen = isControlled ? open : innerOpen
+    const [dirty, setDirty] = React.useState(false);
+  const [confirming, setConfirming] = React.useState(false)
+    const [previousOpen, setPreviousOpen] = React.useState(effectiveOpen);
+
+    // Reset the guard before children render, including parent-driven closes.
+    if (previousOpen !== effectiveOpen) {
+        setPreviousOpen(effectiveOpen);
+        setDirty(false);
+    setConfirming(false)
+    }
+
+  const close = () => {
+        setDirty(false);
+    setConfirming(false)
+    if (!isControlled) setInnerOpen(false)
+    onOpenChange?.(false)
+  }
+
+  const handleOpenChange = (next: boolean) => {
+        if (!next && confirmOnClose && dirty) {
+      setConfirming(true)
+      return
+    }
+    if (!isControlled) setInnerOpen(next)
+    onOpenChange?.(next)
+  }
+
+    const ctx = React.useMemo(
+        () => ({
+            markDirty: () => {
+                setDirty(true);
+            },
+        }),
+        [],
+    );
+
+  return (
+    <DirtyContext.Provider value={ctx}>
+      <DialogPrimitive.Root
+        data-slot="dialog"
+        open={effectiveOpen}
+        onOpenChange={handleOpenChange}
+        {...props}
+      />
+      <AlertDialog open={confirming} onOpenChange={setConfirming}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+                        <AlertDialogTitle>
+                            Tutup dan buang isian?
+                        </AlertDialogTitle>
+            <AlertDialogDescription>
+                            Data yang sudah Anda isi belum disimpan dan akan
+                            hilang jika formulir ditutup.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Lanjut mengisi</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-white hover:bg-destructive/90"
+              onClick={close}
+            >
+              Buang &amp; tutup
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </DirtyContext.Provider>
+  )
+}
+
+function DialogTrigger({
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Trigger>) {
+  return <DialogPrimitive.Trigger data-slot="dialog-trigger" {...props} />
+}
+
+function DialogPortal({
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Portal>) {
+  return <DialogPrimitive.Portal data-slot="dialog-portal" {...props} />
+}
+
+function DialogClose({
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Close>) {
+  return <DialogPrimitive.Close data-slot="dialog-close" {...props} />
+}
+
+function DialogOverlay({
+  className,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Overlay>) {
+  return (
+    <DialogPrimitive.Overlay
+      data-slot="dialog-overlay"
+      className={cn(
+        "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 fixed inset-0 z-50 bg-black/50",
+                className,
+      )}
+      {...props}
+    />
+  )
+}
+
+function DialogContent({
+  className,
+  children,
+  showCloseButton = true,
+  onPointerDownOutside,
+  onInput,
+  onChange,
+  onClick,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Content> & {
+  showCloseButton?: boolean
+}) {
+  const dirty = React.useContext(DirtyContext)
+  // Only edits made inside a <form> count as "input worth protecting".
+  const markIfForm = (target: EventTarget) => {
+        if (target instanceof Element && target.closest("form"))
+            dirty?.markDirty();
+  }
+  return (
+    <DialogPortal data-slot="dialog-portal">
+      <DialogOverlay />
+      <DialogPrimitive.Content
+        data-slot="dialog-content"
+        className={cn(
+          "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 flex max-h-[calc(100dvh-2rem)] w-[calc(100%-1.5rem)] translate-x-[-50%] translate-y-[-50%] flex-col gap-4 overflow-y-auto overscroll-contain rounded-lg border p-4 shadow-lg duration-200 sm:max-w-lg sm:p-6",
+                    className,
+        )}
+        onPointerDownOutside={(event) => {
+          if (showCloseButton) event.preventDefault();
+          onPointerDownOutside?.(event);
+        }}
+        onInput={(e) => {
+          markIfForm(e.target)
+          onInput?.(e)
+        }}
+        onChange={(e) => {
+          markIfForm(e.target)
+          onChange?.(e)
+        }}
+        onClick={(e) => {
+          // Button-style controls (radio cards, checkboxes, switches) don't emit input events.
+          const t = e.target
+                    if (
+                        t instanceof Element &&
+                        t.closest(
+                            '[role="radio"],[role="checkbox"],[role="switch"]',
+                        )
+                    )
+                        markIfForm(t);
+          onClick?.(e)
+        }}
+        {...props}
+      >
+        {children}
+        {showCloseButton && (
+          <DialogPrimitive.Close
+            data-slot="dialog-close"
+            className="ring-offset-background focus:ring-ring data-[state=open]:bg-accent data-[state=open]:text-muted-foreground absolute top-4 right-4 rounded-xs opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"
+          >
+            <XIcon />
+            <span className="sr-only">Close</span>
+          </DialogPrimitive.Close>
+        )}
+      </DialogPrimitive.Content>
+    </DialogPortal>
+  )
+}
+
+function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="dialog-header"
+            className={cn(
+                "flex shrink-0 flex-col gap-2 pr-8 text-center sm:text-left",
+                className,
+            )}
+      {...props}
+    />
+  )
+}
+
+function DialogFooter({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      data-slot="dialog-footer"
+      className={cn(
+        "-mx-4 -mb-4 mt-1 flex flex-col-reverse gap-2 border-t bg-background px-4 pt-3 pb-4 sm:-mx-6 sm:-mb-6 sm:flex-row sm:justify-end sm:px-6 sm:pb-6",
+                className,
+      )}
+      {...props}
+    />
+  )
+}
+
+function DialogTitle({
+  className,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Title>) {
+  return (
+    <DialogPrimitive.Title
+      data-slot="dialog-title"
+      className={cn("text-lg leading-none font-semibold", className)}
+      {...props}
+    />
+  )
+}
+
+function DialogDescription({
+  className,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Description>) {
+  return (
+    <DialogPrimitive.Description
+      data-slot="dialog-description"
+      className={cn("text-muted-foreground text-sm", className)}
+      {...props}
+    />
+  )
+}
+
+export {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogOverlay,
+  DialogPortal,
+  DialogTitle,
+  DialogTrigger,
+}

@@ -1,0 +1,421 @@
+import { useEffect, useState } from "react";
+import { routePlanKey } from "@/domain/transport-ops";
+import { toast } from "sonner";
+import {
+  apiGet,
+  apiPost,
+  apiPut,
+  employeesByPosition,
+  type Options,
+  type Shipment,
+  type Transport,
+  type TransportDetail,
+} from "@/infrastructure/http/client-api";
+import { runAction, useApiData } from "@/hooks/use-api-data";
+import { Field, FormSelect, SubmitButton } from "@/components/app/form-parts";
+import { TransportFormCapacityPreview } from "@/components/app/capacity-status-card";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+
+interface TransportForm {
+  routeId: string;
+  vehicleId: string;
+  driverId: string;
+  kenekId: string;
+  warehouseStaffId: string;
+  origin: string;
+  destination: string;
+  plannedDepartureAt: string; // datetime-local
+  plannedArrivalAt: string; // datetime-local
+  /** DIRECT (default) or MULTI_DROP — set at creation only */
+  transportMode: "DIRECT" | "MULTI_DROP";
+  trackingMode: "CHECKPOINT" | "ACTIVITY";
+  shipmentIds: number[];
+}
+
+const EMPTY: TransportForm = {
+  routeId: "", vehicleId: "", driverId: "", kenekId: "", warehouseStaffId: "",
+  origin: "", destination: "", plannedDepartureAt: "", plannedArrivalAt: "", transportMode: "DIRECT", trackingMode: "CHECKPOINT",
+  shipmentIds: [],
+};
+
+/** datetime-local value (local timezone) for a Date. */
+export function toLocalInput(d: Date | null | undefined): string {
+  if (!d) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * Shared create/edit Transport dialog (used by the Transports list page AND
+ * the Transport detail page).
+ *
+ * Validation (user requirements):
+ * - Rute wajib dipilih (required)
+ * - Rencana Berangkat & Rencana Tiba wajib diisi (required)
+ * - Picking a Rute auto-fills Asal & Tujuan from the route — the values land
+ *   in editable inputs so the user can still override them.
+ */
+export function TransportFormDialog(props: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  editing: Transport | null;
+  onSaved: () => void;
+}) {
+  if (!props.open) return null;
+  return <TransportFormSession key={props.editing?.id ?? "create"} {...props} />;
+}
+
+function TransportFormSession({
+  open,
+  onOpenChange,
+  editing,
+  onSaved,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** null = create mode; a transport row = edit mode (PLANNED only). */
+  editing: Transport | null;
+  onSaved: () => void;
+}) {
+  const { data: options } = useApiData<Options>(() => apiGet<Options>("/options"), []);
+  const [form, setForm] = useState<TransportForm>(() => {
+    if (!editing) return EMPTY;
+    return {
+        routeId: editing.routeId ? String(editing.routeId) : "",
+        vehicleId: String(editing.vehicleId),
+        driverId: editing.driverId ? String(editing.driverId) : "",
+        kenekId: editing.kenekId ? String(editing.kenekId) : "",
+        warehouseStaffId: editing.warehouseStaffId ? String(editing.warehouseStaffId) : "",
+        origin: editing.origin ?? "",
+        destination: editing.destination ?? "",
+        plannedDepartureAt: toLocalInput(editing.plannedDepartureAt ? new Date(editing.plannedDepartureAt) : null),
+        plannedArrivalAt: toLocalInput(editing.plannedArrivalAt ? new Date(editing.plannedArrivalAt) : null),
+        shipmentIds: [],
+        transportMode: editing.transportMode ?? "DIRECT",
+        trackingMode: editing.trackingMode ?? "CHECKPOINT",
+    };
+
+  });
+  const [busy, setBusy] = useState(false);
+  const [readyShipments, setReadyShipments] = useState<Shipment[]>([]);
+  // Capacity Round — in edit mode, fetch the transport's current shipments
+  // (with totals) so the capacity preview can project against them. The
+  // `editing` Transport row doesn't carry shipment totals.
+  const [editShipments, setEditShipments] = useState<TransportDetail["shipments"]>([]);
+
+  const editingId = editing?.id;
+  useEffect(() => {
+    if (editingId != null) {
+      // Capacity Round — fetch the transport's current shipments (with totals)
+      // so the capacity preview can project against them in edit mode.
+      apiGet<TransportDetail>(`/transports/${editingId}`)
+        .then((t) => { setEditShipments(t.shipments ?? []); setForm(f => ({ ...f, driverId: f.driverId || (t.driver?.id ? String(t.driver.id) : "none"), kenekId: f.kenekId || (t.kenek?.id ? String(t.kenek.id) : "none"), warehouseStaffId: f.warehouseStaffId || (t.warehouseStaff?.id ? String(t.warehouseStaff.id) : "none") })); })
+        .catch(() => setEditShipments([]));
+    } else {
+      // Revise round 9 — fetch BOTH STANDARD (RECEIVED_AT_GUDANG) and DIRECT
+      // (CREATED / READY_FOR_PICKUP) shipments so the user can pick from
+      // either fulfillment mode when loading a transport. The server-side
+      // POST /transports endpoint enforces the actual eligibility rules.
+      Promise.all([
+        apiGet<Shipment[]>("/shipments?status=RECEIVED_AT_GUDANG").catch(() => [] as Shipment[]),
+        apiGet<Shipment[]>("/shipments?status=CREATED").catch(() => [] as Shipment[]),
+        apiGet<Shipment[]>("/shipments?status=READY_FOR_PICKUP").catch(() => [] as Shipment[]),
+      ]).then(([std, dirCreated, dirReady]) => {
+        // Merge + dedupe by id + keep only DIRECT entries from the CREATED /
+        // READY_FOR_PICKUP pools (STANDARD ones come only from RECEIVED_AT_GUDANG).
+        const seen = new Set<number>();
+        const merged: Shipment[] = [];
+        for (const s of [...std, ...dirCreated, ...dirReady]) {
+          if (seen.has(s.id)) continue;
+          seen.add(s.id);
+          // Exclude DIRECT shipments from the RECEIVED_AT_GUDANG pool (they
+          // shouldn't have that status anyway, but defensive): they're
+          // already merged from the DIRECT pools above.
+          // Also exclude STANDARD shipments from the CREATED/READY_FOR_PICKUP
+          // pools — they need to go through the warehouse scan flow first.
+          const isDirect = (s.fulfillmentMode ?? "STANDARD") === "DIRECT";
+          if (std.includes(s) && !isDirect) {
+            merged.push(s);
+          } else if (isDirect) {
+            merged.push(s);
+          }
+        }
+        setReadyShipments(merged);
+      });
+    }
+  }, [editingId]);
+
+  // Position-filtered crew dropdowns: Driver select lists ONLY drivers and the
+  // Kenek select ONLY keneks. Falls back to the full list only when no
+  // employee has a position set.
+  const driverOptions = employeesByPosition(options?.employees ?? [], "Driver").map((e) => ({ value: String(e.id), label: e.name }));
+  const kenekOptions = employeesByPosition(options?.employees ?? [], "Kenek").map((e) => ({ value: String(e.id), label: e.name }));
+  const uniqueRoutes = new Map<string, Options["routes"][number]>();
+  for (const route of options?.routes ?? []) {
+    const key = route.name.endsWith(" (Balik)") ? routePlanKey(route) : String(route.id);
+    if (!uniqueRoutes.has(key) || String(route.id) === form.routeId) uniqueRoutes.set(key, route);
+  }
+  const routeOptions = [...uniqueRoutes.values()].map((r) => ({ value: String(r.id), label: r.name }));
+  const selectedRouteMeta = options?.routes?.find((r) => String(r.id) === form.routeId);
+  // Capacity Round — the selected vehicle, for the live capacity preview.
+  const selectedVehicle = options?.vehicles?.find((v) => String(v.id) === form.vehicleId) ?? null;
+  // Project the capacity against the shipments the operator has checked.
+  // In CREATE mode: the checked readyShipments. In EDIT mode: the transport's
+  // current assigned shipments (fetched above with their totals) — so the
+  // operator sees how the currently-assigned cargo loads the vehicle, and how
+  // changing the vehicle would change the status.
+  const previewShipments = !editing
+    ? readyShipments.filter((s) => form.shipmentIds.includes(s.id))
+    : editShipments.map((s) => ({
+        id: s.id,
+        totals: { totalActualKg: s.weightKg ?? 0, totalVolumeM3: s.volumeM3 ?? 0, totalPackages: s.packages ?? 0 },
+      }));
+
+  function onRouteChange(v: string) {
+    const route = options?.routes?.find((r) => String(r.id) === v);
+    // Auto-fill Asal & Tujuan from the selected route — ALWAYS refreshed on
+    // route change (the user can still edit the inputs afterwards).
+    setForm((f) => ({
+      ...f,
+      routeId: v,
+      origin: route?.origin ?? f.origin,
+      destination: route?.destination ?? f.destination,
+    }));
+  }
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    // Client-side required validation (the API enforces the same rules).
+    if (!form.routeId) {
+      toast.error("Rute wajib dipilih.");
+      return;
+    }
+    if (!form.vehicleId) {
+      toast.error("Kendaraan wajib dipilih.");
+      return;
+    }
+    if (!form.plannedDepartureAt) {
+      toast.error("Rencana Berangkat wajib diisi.");
+      return;
+    }
+    if (!form.plannedArrivalAt) {
+      toast.error("Rencana Tiba wajib diisi.");
+      return;
+    }
+    if (form.plannedArrivalAt < form.plannedDepartureAt) {
+      toast.error("Rencana Tiba tidak boleh lebih awal dari Rencana Berangkat.");
+      return;
+    }
+    setBusy(true);
+    const payload: Record<string, unknown> = {
+      routeId: Number(form.routeId),
+      vehicleId: Number(form.vehicleId),
+      origin: form.origin || null,
+      destination: form.destination || null,
+      plannedDepartureAt: form.plannedDepartureAt ? new Date(form.plannedDepartureAt).toISOString() : null,
+      plannedArrivalAt: form.plannedArrivalAt ? new Date(form.plannedArrivalAt).toISOString() : null,
+    };
+    if (form.driverId) payload.driverId = form.driverId === "none" ? null : Number(form.driverId);
+    if (form.kenekId) payload.kenekId = form.kenekId === "none" ? null : Number(form.kenekId);
+    if (form.warehouseStaffId) payload.warehouseStaffId = form.warehouseStaffId === "none" ? null : Number(form.warehouseStaffId);
+    if (!editing && form.shipmentIds.length > 0) payload.shipmentIds = form.shipmentIds;
+    if (!editing) {
+      payload.transportMode = form.transportMode;
+      payload.trackingMode = form.trackingMode;
+    }
+    const ok = await runAction(
+      () => (editing ? apiPut(`/transports/${editing.id}`, payload) : apiPost("/transports", payload)),
+      { success: editing ? "Transport diperbarui." : "Transport direncanakan." },
+    );
+    setBusy(false);
+    if (ok) {
+      onOpenChange(false);
+      onSaved();
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90dvh] overflow-y-auto rounded-2xl sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{editing ? `Edit Transport - ${editing.transportCode}` : "Rencanakan Transport"}</DialogTitle>
+          <DialogDescription>
+            {editing
+              ? "Hanya transport PLANNED yang bisa diubah. Rute, Rencana Berangkat & Rencana Tiba wajib terisi."
+              : "Rute, Kendaraan, Rencana Berangkat & Rencana Tiba wajib diisi. Asal & Tujuan terisi otomatis dari rute (masih bisa diubah)."}
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={onSubmit} className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Rute" htmlFor="t-route" hint="Wajib">
+              <FormSelect
+                value={form.routeId}
+                onValueChange={onRouteChange}
+                placeholder="Pilih rute"
+                options={routeOptions}
+                disabled={busy}
+              />
+            </Field>
+            <Field label="Kendaraan" htmlFor="t-vehicle" hint="Wajib">
+              <FormSelect
+                value={form.vehicleId}
+                onValueChange={(v) => setForm({ ...form, vehicleId: v })}
+                placeholder="Pilih kendaraan aktif"
+                options={(options?.vehicles ?? []).map((v) => ({ value: String(v.id), label: `${v.vehicleNumber}${v.name ? ` - ${v.name}` : ""}` }))}
+                disabled={busy}
+              />
+            </Field>
+            {!editing && (
+              <Field label="Mode Transport" htmlFor="t-mode" hint="Multi Drop: tiap resi bisa turun di titik berbeda, dengan checkpoint atau activity tracking" className="sm:col-span-2">
+                <FormSelect
+                  value={form.transportMode}
+                  onValueChange={(v) => setForm({ ...form, transportMode: v as "DIRECT" | "MULTI_DROP" })}
+                  options={[
+                    { value: "DIRECT", label: "Direct - satu tujuan akhir" },
+                    { value: "MULTI_DROP", label: "Multi Drop - banyak titik turun" },
+                  ]}
+                  disabled={busy}
+                />
+              </Field>
+            )}
+            {!editing && (
+              <Field label="Mode Tracking" htmlFor="t-tracking" hint="Activity menggunakan foto kamera dan GPS, tanpa checkpoint." className="sm:col-span-2">
+                <FormSelect
+                  value={form.trackingMode}
+                  onValueChange={(v) => setForm({ ...form, trackingMode: v as "CHECKPOINT" | "ACTIVITY" })}
+                  options={[
+                    { value: "CHECKPOINT", label: "Checkpoint Tracking" },
+                    { value: "ACTIVITY", label: "Activity Tracking (Tanpa Checkpoint)" },
+                  ]}
+                  disabled={busy}
+                />
+              </Field>
+            )}
+            <Field label="Driver" htmlFor="t-driver">
+              <FormSelect value={form.driverId} onValueChange={(v) => setForm({ ...form, driverId: v })} placeholder="Pilih driver" options={[{ value: "none", label: "Tanpa driver" }, ...driverOptions]} disabled={busy} />
+            </Field>
+            <Field label="Kenek (opsional)" htmlFor="t-kenek">
+              <FormSelect value={form.kenekId} onValueChange={(v) => setForm({ ...form, kenekId: v })} placeholder="Pilih kenek" options={[{ value: "none", label: "Tanpa kenek" }, ...kenekOptions]} disabled={busy} />
+            </Field>
+            <Field label="Petugas Gudang" hint="Opsional — ditampilkan pada manifest">
+              <FormSelect ariaLabel="Petugas Gudang" value={form.warehouseStaffId} onValueChange={value => setForm({ ...form, warehouseStaffId: value })} options={[{ value: "none", label: "Tanpa petugas gudang" }, ...employeesByPosition(options?.employees ?? [], "Gudang").map(employee => ({ value: String(employee.id), label: employee.name }))]} placeholder="Pilih petugas gudang" disabled={busy} />
+            </Field>
+            <Field label="Asal (Origin)" htmlFor="t-origin" hint="Otomatis dari rute - dapat diubah">
+              <input
+                id="t-origin"
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs"
+                value={form.origin}
+                onChange={(e) => setForm({ ...form, origin: e.target.value })}
+                placeholder={selectedRouteMeta?.origin ?? "mis. Medan"}
+                disabled={busy}
+              />
+            </Field>
+            <Field label="Tujuan (Destination)" htmlFor="t-destination" hint="Otomatis dari rute - dapat diubah">
+              <input
+                id="t-destination"
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs"
+                value={form.destination}
+                onChange={(e) => setForm({ ...form, destination: e.target.value })}
+                placeholder={selectedRouteMeta?.destination ?? "mis. Banda Aceh"}
+                disabled={busy}
+              />
+            </Field>
+            <Field label="Rencana Berangkat" htmlFor="t-planned-dep" hint="Wajib">
+              <input
+                id="t-planned-dep"
+                type="datetime-local"
+                required
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs"
+                value={form.plannedDepartureAt}
+                onChange={(e) => setForm({ ...form, plannedDepartureAt: e.target.value })}
+                disabled={busy}
+              />
+            </Field>
+            <Field label="Rencana Tiba" htmlFor="t-planned-arr" hint="Wajib">
+              <input
+                id="t-planned-arr"
+                type="datetime-local"
+                required
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm shadow-xs"
+                value={form.plannedArrivalAt}
+                onChange={(e) => setForm({ ...form, plannedArrivalAt: e.target.value })}
+                disabled={busy}
+              />
+            </Field>
+          </div>
+
+          {!editing && (
+            <div className="space-y-2">
+              {/* Revise round 9 - removed the over-explained "(status RECEIVED_AT_GUDANG)"
+                  text. Each shipment row now shows a compact DIRECT / STANDARD
+                  badge so the user can tell at a glance which flow the shipment
+                  belongs to. */}
+              <p className="text-sm font-medium text-foreground">Muat shipment</p>
+              {readyShipments.length === 0 ? (
+                <p className="rounded-lg border border-dashed px-3.5 py-3 text-sm text-muted-foreground">
+                  Tidak ada shipment siap dimuat.
+                </p>
+              ) : (
+                <div className="max-h-40 space-y-1.5 overflow-y-auto rounded-lg border p-2.5">
+                  {readyShipments.map((s) => {
+                    const isDirect = (s.fulfillmentMode ?? "STANDARD") === "DIRECT";
+                    return (
+                      <label key={s.id} className="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm hover:bg-accent">
+                        <input
+                          type="checkbox"
+                          checked={form.shipmentIds.includes(s.id)}
+                          onChange={(e) =>
+                            setForm((f) => ({
+                              ...f,
+                              shipmentIds: e.target.checked ? [...f.shipmentIds, s.id] : f.shipmentIds.filter((id) => id !== s.id),
+                            }))
+                          }
+                          className="h-4 w-4 rounded border-input accent-primary"
+                        />
+                        <span className="font-mono text-xs font-semibold">{s.masterCode}</span>
+                        <span
+                          className={
+                            "inline-flex shrink-0 items-center rounded-full px-1.5 py-0.5 text-[10px] font-semibold " +
+                            (isDirect
+                              ? "bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300"
+                              : "bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-300")
+                          }
+                          title={isDirect ? "DIRECT - driver langsung, tanpa gudang" : "STANDARD - lewat gudang"}
+                        >
+                          {isDirect ? "DIRECT" : "STANDARD"}
+                        </span>
+                        <span className="truncate text-xs text-muted-foreground">
+                          {s.customer?.name} · {s.destination}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+              {/* Capacity Round — live preview of the selected vehicle's capacity
+                  against the checked shipments. Non-blocking (informational). */}
+              {selectedVehicle && (
+                <TransportFormCapacityPreview vehicle={selectedVehicle} selectedShipments={previewShipments} />
+              )}
+            </div>
+          )}
+
+          {/* Capacity Round — in EDIT mode, show the capacity preview against
+              the transport's current assigned shipments + the selected vehicle
+              (so the operator sees how changing the vehicle affects the status). */}
+          {editing && selectedVehicle && (
+            <TransportFormCapacityPreview vehicle={selectedVehicle} selectedShipments={previewShipments} />
+          )}
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+              Batal
+            </Button>
+            <SubmitButton busy={busy}>{editing ? "Simpan Perubahan" : "Rencanakan Transport"}</SubmitButton>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}

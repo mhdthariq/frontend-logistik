@@ -1,0 +1,329 @@
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Camera, CheckCircle2, Crosshair, Loader2, MapPin, RefreshCw, TriangleAlert } from "lucide-react";
+import { toast } from "sonner";
+import { apiPost, type CheckinResponse, type Checkpoint } from "@/infrastructure/http/client-api";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { FormSelect, formatNumber } from "@/components/app/form-parts";
+
+export interface CheckinCheckpointInfo extends Checkpoint {
+  checkedIn: boolean;
+  latestRecordAt: string | null;
+}
+
+interface CheckinDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  transportId: number;
+  transportCode: string;
+  checkpoints: CheckinCheckpointInfo[];
+  onDone: () => void;
+}
+
+/** Haversine distance (meters) — client-side preview only; the server
+ *  recomputes and enforces the radius (Revision Part Z). */
+function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371000;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return Math.round(2 * R * Math.asin(Math.sqrt(a)));
+}
+
+/** Compress a captured camera frame to a ~720px JPEG data URL. */
+function compressToJpeg(source: HTMLVideoElement, maxSide = 720): string {
+  const w = source.videoWidth;
+  const h = source.videoHeight;
+  const scale = Math.min(1, maxSide / Math.max(w, h) || 1);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(w * scale));
+  canvas.height = Math.max(1, Math.round(h * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas tidak tersedia.");
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.72);
+}
+
+/**
+ * Checkpoint selfie check-in dialog (Revision Part O).
+ * - pick the checkpoint (unchecked ones only)
+ * - capture GPS (live distance preview vs the checkpoint radius)
+ * - take a selfie with the camera (getUserMedia only)
+ * - submit → server validates the radius and stores photo + location + user
+ */
+export function CheckpointCheckinDialog(props: CheckinDialogProps) {
+  if (!props.open) return null;
+  return <CheckpointCheckinSession key={props.transportId} {...props} />;
+}
+
+function CheckpointCheckinSession({ open, onOpenChange, transportId, transportCode, checkpoints, onDone }: CheckinDialogProps) {
+  const [checkpointId, setCheckpointId] = useState<number | null>(() => checkpoints.find((c) => !c.checkedIn)?.id ?? null);
+  const [coords, setCoords] = useState<{ lat: number; lng: number; accuracy: number } | null>(null);
+  const [locating, setLocating] = useState(() => typeof navigator !== "undefined" && !!navigator.geolocation);
+  const [photo, setPhoto] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [cameraOn, setCameraOn] = useState(false);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const aliveRef = useRef(false);
+  const pending = checkpoints.filter((c) => !c.checkedIn);
+  const selected = checkpoints.find((c) => c.id === checkpointId) ?? null;
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    };
+  }, []);
+
+  const stopCamera = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    setCameraOn(false);
+  }, []);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    const stream = streamRef.current;
+    if (!cameraOn || !video || !stream) return;
+    video.srcObject = stream;
+    void video.play().catch(() => undefined);
+    return () => { video.srcObject = null; };
+  }, [cameraOn]);
+
+  const startCamera = useCallback(async () => {
+    setError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+      if (!aliveRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = stream;
+      setCameraOn(true);
+    } catch {
+      if (!aliveRef.current) return;
+      setError("Kamera tidak dapat diakses - izin kamera wajib untuk check-in.");
+    }
+  }, []);
+
+  const capture = useCallback(() => {
+    if (!videoRef.current) return;
+    try {
+      const dataUrl = compressToJpeg(videoRef.current);
+      setPhoto(dataUrl);
+      stopCamera();
+    } catch {
+      setError("Gagal memproses foto - coba lagi.");
+    }
+  }, [stopCamera]);
+
+  const locate = useCallback(() => {
+    setError(null);
+    if (!navigator.geolocation) {
+      setError("Perangkat tidak mendukung lokasi GPS.");
+      return;
+    }
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        if (!aliveRef.current) return;
+        setCoords({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy: Math.round(pos.coords.accuracy),
+        });
+        setLocating(false);
+      },
+      () => {
+        if (!aliveRef.current) return;
+        setLocating(false);
+        setError("Lokasi tidak dapat diambil - pastikan izin lokasi aktif, lalu coba lagi.");
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 5000 },
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    let active = true;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        if (!active) return;
+        setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy) });
+        setLocating(false);
+      },
+      () => {
+        if (!active) return;
+        setLocating(false);
+        setError("Lokasi tidak dapat diambil - pastikan izin lokasi aktif, lalu coba lagi.");
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 5000 },
+    );
+    return () => { active = false; };
+  }, []);
+
+  const liveDistance = selected && coords ? distanceMeters(coords.lat, coords.lng, selected.latitude, selected.longitude) : null;
+  const radiusM = selected?.radiusMeters ?? 0;
+  const inRadius = liveDistance != null && liveDistance <= radiusM;
+
+  async function submit() {
+    if (!selected || submitting) return;
+    if (!coords) {
+      setError("Lokasi GPS belum didapat - tekan tombol lokasi.");
+      return;
+    }
+    if (!photo) {
+      setError("Foto selfie wajib diambil sebagai bukti check-in.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await apiPost<CheckinResponse>(`/transports/${transportId}/checkins`, {
+        checkpointId: selected.id,
+        latitude: coords.lat,
+        longitude: coords.lng,
+        photo,
+      });
+      if (!aliveRef.current) return;
+      toast.success(res.message);
+      onOpenChange(false);
+      onDone();
+    } catch (err) {
+      if (!aliveRef.current) return;
+      // The server explains precisely why a check-in was rejected (distance
+      // vs radius) — surface it verbatim (Revision Part O).
+      setError(err instanceof Error ? err.message : "Check-in gagal.");
+    } finally {
+      if (aliveRef.current) setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90dvh] overflow-y-auto rounded-2xl sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <MapPin className="h-5 w-5 text-primary" /> Check-in Checkpoint - {transportCode}
+          </DialogTitle>
+          <DialogDescription>
+            Ambil foto selfie di lokasi checkpoint. Sistem memvalidasi jarak Anda terhadap radius checkpoint.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          {/* checkpoint picker */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground">Checkpoint</label>
+            <FormSelect
+              value={checkpointId == null ? "" : String(checkpointId)}
+              onValueChange={(value) => setCheckpointId(Number(value) || null)}
+              placeholder={pending.length === 0 ? "Semua checkpoint sudah check-in" : "Pilih checkpoint…"}
+              options={pending.map((c) => ({ value: String(c.id), label: `#${c.sequence} · ${c.name}` }))}
+              disabled={submitting || pending.length === 0}
+            />
+          </div>
+
+          {/* GPS */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-medium text-foreground">Lokasi GPS</label>
+              <Button type="button" variant="outline" size="sm" className="h-7" onClick={locate} disabled={locating || submitting}>
+                {locating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />} Ambil Lokasi
+              </Button>
+            </div>
+            <div
+              className={`rounded-lg border px-3 py-2 text-xs ${
+                coords
+                  ? inRadius
+                    ? "border-emerald-300 bg-emerald-50/60 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300"
+                    : "border-amber-300 bg-amber-50/60 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300"
+                  : "bg-muted/40 text-muted-foreground"
+              }`}
+            >
+              {coords ? (
+                <div className="flex items-start gap-2">
+                  <Crosshair className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <div>
+                    <p className="font-mono">{coords.lat.toFixed(6)}, {coords.lng.toFixed(6)} (±{coords.accuracy} m)</p>
+                    {selected && (
+                      <p className="mt-0.5">
+                        Jarak ke {selected.name}: <strong>{formatNumber((liveDistance ?? 0) / 1000, 2)} KM</strong> · radius{" "}
+                        <strong>{formatNumber(radiusM / 1000, 2)} KM</strong>{" "}
+                        {inRadius ? "- dalam radius ✓" : "- DI LUAR RADIUS, mendekatlah ke checkpoint"}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <p className="flex items-center gap-2">
+                  <Crosshair className="h-3.5 w-3.5" /> {locating ? "Mencari lokasi GPS…" : "Lokasi belum diambil."}
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* selfie */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground">Foto Selfie (bukti check-in)</label>
+            {photo ? (
+              <div className="space-y-2">
+                { }
+                <img src={photo} alt="Bukti selfie check-in" className="h-44 w-full rounded-lg border object-cover" />
+                <Button type="button" variant="outline" size="sm" onClick={() => setPhoto(null)} disabled={submitting}>
+                  <Camera className="h-3.5 w-3.5" /> Ambil Ulang
+                </Button>
+              </div>
+            ) : cameraOn ? (
+              <div className="space-y-2">
+                <video ref={videoRef} playsInline muted className="h-44 w-full rounded-lg border bg-black object-cover" />
+                <div className="flex gap-2">
+                  <Button type="button" size="sm" onClick={capture} disabled={submitting}>
+                    <Camera className="h-3.5 w-3.5" /> Ambil Foto
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" onClick={stopCamera} disabled={submitting}>
+                    Batal
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <Button type="button" variant="outline" className="w-full" onClick={startCamera} disabled={submitting}>
+                  <Camera className="h-4 w-4" /> Buka Kamera Selfie
+                </Button>
+              </div>
+            )}
+          </div>
+
+          {error && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-300">
+              <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              <span className="leading-relaxed">{error}</span>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>
+            Batal
+          </Button>
+          <Button onClick={submit} disabled={submitting || !photo || !coords || !selected}>
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+            {submitting ? "Mengirim…" : "Kirim Check-in"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

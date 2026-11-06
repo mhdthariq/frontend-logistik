@@ -1,0 +1,182 @@
+
+import { useEffect, useRef } from "react";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
+import { googleTileLayer } from "@/presentation/map-tiles";
+import type { Checkpoint } from "@/infrastructure/http/client-api";
+
+export interface TransportMapCheckpoint extends Checkpoint {
+  checkedIn: boolean;
+  latestRecordAt: string | null;
+  latestBy: string | null;
+}
+
+export interface TransportCheckinPoint {
+  latitude: number;
+  longitude: number;
+  recordedAt: string;
+}
+
+/**
+ * Transport position map (Revision Part K §2):
+ * - route polyline + every checkpoint with its radius circle
+ * - checkpoints already checked in are highlighted with a green cargo marker
+ * - the transport's current (last known) position marker
+ * - zoom controls bottom-left, overlays inside an isolated stacking context
+ *   (never covers the navbar — Revision Part F)
+ *
+ * NOTE on dependency stability: callers typically pass `currentPosition` and
+ * `checkins` as inline object/array literals. That means a NEW reference is
+ * produced on every parent render. If we used the raw props in the redraw
+ * effect's deps array, the map would wipe and re-draw all layers (markers,
+ * circles, polyline, fit-bounds) on every parent re-render — causing visible
+ * flicker when the user types in a search box, opens a sibling dialog, etc.
+ * We therefore derive stable primitive keys (joined strings) for the deps
+ * and read the latest raw values via refs.
+ */
+export function TransportMap({
+  checkpoints,
+  currentPosition,
+  checkins,
+  height = 340,
+  fitTo = "route",
+}: {
+  checkpoints: TransportMapCheckpoint[];
+  currentPosition: { latitude: number; longitude: number; recordedAt: string | null } | null;
+  checkins: TransportCheckinPoint[];
+  height?: number;
+  fitTo?: "route" | "position";
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const layerRef = useRef<L.LayerGroup | null>(null);
+
+  // Stable primitive keys derived from the (possibly unstable) props.
+  const checkpointsKey = checkpoints
+    .map((c) => `${c.id}:${c.latitude},${c.longitude}:${c.checkedIn ? 1 : 0}:${c.latestRecordAt ?? ""}`)
+    .join("|");
+  const positionKey = currentPosition
+    ? `${currentPosition.latitude},${currentPosition.longitude},${currentPosition.recordedAt ?? ""}`
+    : "";
+  const checkinsKey = checkins
+    .map((p) => `${p.latitude},${p.longitude},${p.recordedAt}`)
+    .join("|");
+
+  // Keep refs to the latest raw values so the effect body reads the most
+  // up-to-date data without forcing re-runs on identity changes.
+  const checkpointsRef = useRef(checkpoints);
+
+  const currentPositionRef = useRef(currentPosition);
+
+  const checkinsRef = useRef(checkins);
+
+
+  useEffect(() => {
+    checkpointsRef.current = checkpoints;
+    currentPositionRef.current = currentPosition;
+    checkinsRef.current = checkins;
+  }, [checkpoints, currentPosition, checkins]);
+
+  useEffect(() => {
+    if (!containerRef.current || mapRef.current) return;
+    const map = L.map(containerRef.current, { zoomControl: false, scrollWheelZoom: true }).setView([3.5952, 98.6722], 8);
+    L.control.zoom({ position: "bottomleft" }).addTo(map);
+    googleTileLayer(L).addTo(map);
+    mapRef.current = map;
+    layerRef.current = L.layerGroup().addTo(map);
+
+    return () => {
+      map.remove();
+      mapRef.current = null;
+      layerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const layer = layerRef.current;
+    if (!map || !layer) return;
+    layer.clearLayers();
+
+    // Read latest values from refs (avoid stale closures).
+    const cps = checkpointsRef.current;
+    const pos = currentPositionRef.current;
+    const ins = checkinsRef.current;
+
+    const latlngs: [number, number][] = [];
+
+    cps.forEach((c) => {
+      latlngs.push([c.latitude, c.longitude]);
+      // radius circle (Revision Part G — visualized on the map)
+      L.circle([c.latitude, c.longitude], {
+        radius: c.radiusMeters,
+        color: c.checkedIn ? "#0d9d70" : "#94a3b8",
+        weight: 1.5,
+        fillColor: c.checkedIn ? "#0d9d70" : "#94a3b8",
+        fillOpacity: 0.12,
+      }).addTo(layer);
+
+      const icon = L.divIcon({
+        className: "kirimku-tp",
+        html: `<div style="min-width:${c.checkedIn ? "38px" : "30px"};height:${c.checkedIn ? "38px" : "30px"};border-radius:9999px;display:flex;align-items:center;justify-content:center;font:700 ${c.checkedIn ? "17px" : "12px"}/1 var(--font-geist-sans, sans-serif);background:${c.checkedIn ? "#0d9d70" : "#334155"};color:#fff;border:${c.checkedIn ? "3px solid #86efac" : "3px solid #fff"};box-shadow:0 2px 8px rgba(0,0,0,.35);padding:0 6px;">${c.checkedIn ? "📦" : c.sequence}</div>`,
+        iconSize: c.checkedIn ? [38, 38] : [30, 30],
+        iconAnchor: c.checkedIn ? [19, 19] : [15, 15],
+      });
+      const label = `${c.sequence}. ${c.name}${c.checkedIn ? ` - check-in ${c.latestRecordAt ? new Date(c.latestRecordAt).toLocaleString("id-ID") : ""}${c.latestBy ? ` oleh ${c.latestBy}` : ""}` : ` · radius ${(c.radiusMeters / 1000).toFixed(2)} KM`}`;
+      const marker = L.marker([c.latitude, c.longitude], { icon }).addTo(layer).bindTooltip(label, { direction: "top", offset: [0, c.checkedIn ? -19 : -12] });
+      if (c.checkedIn) marker.openTooltip();
+    });
+
+    if (latlngs.length >= 2) {
+      L.polyline(latlngs, { color: "#0d9d70", weight: 2.5, opacity: 0.55, dashArray: "6 8" }).addTo(layer);
+    }
+
+    // current position marker (last known)
+    if (pos) {
+      const icon = L.divIcon({
+        className: "kirimku-truck",
+        html: `<div style="width:34px;height:34px;border-radius:9999px;display:flex;align-items:center;justify-content:center;background:#2563eb;color:#fff;border:3px solid #fff;box-shadow:0 2px 10px rgba(0,0,0,.4);font-size:16px;">🚚</div>`,
+        iconSize: [34, 34],
+        iconAnchor: [17, 17],
+      });
+      L.marker([pos.latitude, pos.longitude], { icon })
+        .addTo(layer)
+        .bindTooltip(
+          `Posisi terakhir transport${pos.recordedAt ? ` - ${new Date(pos.recordedAt).toLocaleString("id-ID")}` : ""}`,
+          { direction: "top", offset: [0, -12] },
+        );
+    }
+
+    // all check-in points (trace)
+    ins.forEach((p) => {
+      L.circleMarker([p.latitude, p.longitude], {
+        radius: 4,
+        color: "#2563eb",
+        weight: 2,
+        fillColor: "#2563eb",
+        fillOpacity: 0.8,
+      })
+        .addTo(layer)
+        .bindTooltip(`Check-in ${new Date(p.recordedAt).toLocaleString("id-ID")}`, { direction: "top" });
+    });
+
+    // fit bounds
+    const all: [number, number][] = [...latlngs];
+    if (pos && fitTo === "position") all.push([pos.latitude, pos.longitude]);
+    if (all.length > 0) {
+      map.fitBounds(L.latLngBounds(all).pad(0.25), { animate: false });
+    }
+  }, [checkpointsKey, positionKey, checkinsKey, fitTo]);
+
+  return (
+    <div className="relative isolate">
+      <div
+        ref={containerRef}
+        style={{ height }}
+        className="w-full overflow-hidden rounded-xl border bg-muted/40"
+        role="application"
+        aria-label="Peta posisi transport dan checkpoint"
+      />
+    </div>
+  );
+}
