@@ -22,6 +22,8 @@ it("serves deep links and forwards API requests, auth headers and JSON errors", 
   process.env.GO_API_ORIGIN = `http://127.0.0.1:${address.port}`;
   const vite = await createServer({
     configFile: "vite.config.ts",
+    // Do not replace the running dev server's optimized dependencies.
+    cacheDir: "node_modules/.vite-proxy-test",
     server: { host: "127.0.0.1", port: 0, strictPort: false },
     logLevel: "silent",
   });
