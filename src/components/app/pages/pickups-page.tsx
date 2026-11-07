@@ -1,3 +1,4 @@
+import { usePagedApi } from "@/hooks/use-paged-api";
 
 import { useEffect, useMemo, useState } from "react";
 import { Camera, CheckCircle2, MapPin, Pencil, Phone, Plus, QrCode, Truck, User, XCircle } from "lucide-react";
@@ -45,21 +46,23 @@ export function PickupsPage() {
   // Kurir executor view: without assign capability, only show my own tasks.
   const isExecutor = !can.assign && !user?.isOwner;
 
-  const { data, loading, reload } = useApiData<PickupTask[]>(() => apiGet<PickupTask[]>(`/pickups${isExecutor ? "?mine=true" : ""}`), [isExecutor]);
-  const { data: options } = useApiData<Options>(() => apiGet<Options>("/options"), []);
-  const [readyShipments, setReadyShipments] = useState<Shipment[]>([]);
-
-  useEffect(() => {
-    if (!can.create) return;
-    apiGet<Shipment[]>("/shipments?status=READY_FOR_PICKUP")
-      .then(setReadyShipments)
-      .catch(() => undefined);
-  }, [can.create, data]);
-
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [tab, setTab] = useState("list");
+  const activeGudangId = parseGudangTabValue(tab);
+  const { data, meta, loading, reload, pagination } = usePagedApi<PickupTask>("/pickups", { search, status: statusFilter, warehouseId: activeGudangId, mine: isExecutor }, can.view && tab !== "activity");
+  const rows = data ?? [];
   const [dialogOpen, setDialogOpen] = useState(false);
+  const { data: options } = useApiData<Options>(() => apiGet<Options>("/options?include=employees,warehouses"), []);
+  const [readyShipments, setReadyShipments] = useState<Shipment[]>([]);
+
+  useEffect(() => {
+    if (!can.create || !dialogOpen) return;
+    apiGet<Shipment[]>("/shipments?status=READY_FOR_PICKUP")
+      .then(setReadyShipments)
+      .catch(() => undefined);
+  }, [can.create, dialogOpen]);
+
   const [editing, setEditing] = useState<PickupTask | null>(null);
   const [form, setForm] = useState<PickupForm>(EMPTY);
   const [busy, setBusy] = useState(false);
@@ -71,25 +74,12 @@ export function PickupsPage() {
   const [photoPickup, setPhotoPickup] = useState<PickupTask | null>(null);
 
   // Owner per-gudang tabs (Daftar | Gudang A | Gudang B | … | Log Aktivitas):
-  // filter the already-fetched rows to the selected gudang. Non-owner users
+  // filter in the API before selecting the page. Non-owner users
   // only ever receive their own gudang's data from the API.
   const isOwner = !!user?.isOwner;
   const gudangOptions = options?.warehouses ?? [];
-  const activeGudangId = parseGudangTabValue(tab);
 
-  const rows = useMemo(() => {
-    if (!data) return [];
-    const q = search.toLowerCase();
-    return data.filter(
-      (p) =>
-        (statusFilter === "all" || p.status === statusFilter) &&
-        (activeGudangId == null || (p.gudangIds ?? []).includes(activeGudangId)) &&
-        (!q ||
-          p.pickupCode.toLowerCase().includes(q) ||
-          p.masterCode.toLowerCase().includes(q) ||
-          p.customerName.toLowerCase().includes(q)),
-    );
-  }, [data, search, statusFilter, activeGudangId]);
+
 
   function openCreate() {
     setEditing(null);
@@ -179,6 +169,7 @@ export function PickupsPage() {
 
   const tableView = (
     <OperationalTable
+              pagination={pagination}
       rows={rows}
       loading={loading}
       search={search}
@@ -414,11 +405,12 @@ export function PickupsPage() {
           </>
         }
       />
+      <p className="text-xs text-muted-foreground">Ringkasan sesuai filter aktif.</p>
       <OperationalSummary loading={loading} items={[
-        { label: "Total Tugas", value: data?.length ?? 0 },
-        { label: "Ditugaskan", value: data?.filter((task) => task.status === "ASSIGNED").length ?? 0 },
-        { label: "Dalam Proses", value: data?.filter((task) => task.status === "PICKED_UP").length ?? 0 },
-        { label: "Selesai", value: data?.filter((task) => task.status === "COMPLETED").length ?? 0 },
+        { label: "Total Tugas", value: meta?.total ?? 0 },
+        { label: "Ditugaskan", value: meta?.statuses.ASSIGNED ?? 0 },
+        { label: "Dalam Proses", value: meta?.statuses.PICKED_UP ?? 0 },
+        { label: "Selesai", value: meta?.statuses.COMPLETED ?? 0 },
       ]} />
 
 
@@ -434,7 +426,7 @@ export function PickupsPage() {
         {isOwner &&
           gudangOptions.map((w) => (
             <TabsContent key={w.id} value={gudangTabValue(w.id)} className="mt-3 space-y-3">
-              <GudangTabBanner gudangName={w.name} count={rows.length} />
+              <GudangTabBanner gudangName={w.name} count={meta?.total ?? 0} />
               {tableView}
             </TabsContent>
           ))}

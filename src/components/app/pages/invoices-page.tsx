@@ -1,3 +1,4 @@
+import { usePagedApi } from "@/hooks/use-paged-api";
 import { PasteFileInput } from "@/components/ui/paste-file-input";
 
 import { useMemo, useState } from "react";
@@ -105,13 +106,11 @@ export function InvoicesPage() {
         deleteSettlement: hasPermission(user, "invoice.settlement.delete"),
     };
 
-    const { data, loading, reload } = useApiData<Invoice[]>(
-        () => apiGet<Invoice[]>("/invoices"),
-        [],
-    );
+
+    const [createOpen, setCreateOpen] = useState(false);
     const { data: options, reload: reloadOptions, loading: optionsLoading, error: optionsError } = useApiData<Options>(
-        () => apiGet<Options>("/options"),
-        [],
+        () => apiGet<Options>(`/options?include=${createOpen ? "customers,b2bShipments" : "warehouses"}`),
+        [createOpen],
     );
     const { data: bankAccounts } = useApiData<BankAccount[]>(
         () =>
@@ -122,7 +121,6 @@ export function InvoicesPage() {
     );
     const [search, setSearch] = useState("");
     const [statusFilter, setStatusFilter] = useState("all");
-    const [createOpen, setCreateOpen] = useState(false);
     const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null);
     const [form, setForm] = useState<InvoiceForm>(EMPTY);
     const [busy, setBusy] = useState(false);
@@ -150,17 +148,8 @@ export function InvoicesPage() {
     const [settleProofError, setSettleProofError] = useState("");
     const [printOpen, setPrintOpen] = useState(false);
 
-    const rows = useMemo(() => {
-        if (!data) return [];
-        const q = search.toLowerCase();
-        return data.filter(
-            (inv) =>
-                (statusFilter === "all" || inv.status === statusFilter) &&
-                (!q ||
-                    inv.invoiceNumber.toLowerCase().includes(q) ||
-                    inv.customerName.toLowerCase().includes(q)),
-        );
-    }, [data, search, statusFilter]);
+  const { data, loading, reload, pagination } = usePagedApi<Invoice>("/invoices", { search, status: statusFilter }, can.view);
+  const rows = data ?? [];
 
     const detailWithLines = useMemo(() => {
         return detail;
@@ -511,6 +500,7 @@ export function InvoicesPage() {
                 </TabsList>
                 <TabsContent value="list" className="mt-3">
                     <DataTable
+              pagination={pagination}
                         rows={rows}
                         loading={loading}
                         search={search}

@@ -1,5 +1,6 @@
+import { usePagedApi } from "@/hooks/use-paged-api";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import {
   ArrowRight,
   Boxes,
@@ -22,6 +23,7 @@ import { useAuth } from "@/hooks/use-auth";
 import {
   apiDelete,
   apiGet,
+  apiGetWithMeta,
   apiPost,
   hasPermission,
   type Transport,
@@ -91,15 +93,9 @@ export function TransportsPage({
   const mineOnly = !user?.isOwner && !!user?.roles?.some(
     (role) => role.slug === "driver" || role.slug === "kenek",
   );
-  const { data, loading, reload } = useApiData<Transport[]>(
-    () =>
-      apiGet<Transport[]>(
-        `/transports${historyMode ? "?history=true&mine=true" : mineOnly ? "?mine=true" : ""}`,
-      ),
-    [historyMode, mineOnly, user?.id],
-  );
+
   const { data: options } = useApiData<Options>(
-    () => apiGet<Options>("/options"),
+    () => apiGet<Options>("/options?include=warehouses"),
     [],
   );
 
@@ -107,26 +103,18 @@ export function TransportsPage({
   const [statusFilter, setStatusFilter] = useState("all");
   const [tab, setTab] = useState("list");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [editing, setEditing] = useState<Transport | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<Transport | null>(null);
   const [confirmComplete, setConfirmComplete] = useState<Transport | null>(
     null,
   );
 
-  // Owner per-gudang tabs: filter the fetched rows to the selected gudang.
+  // Owner per-gudang tabs: filter in the API before selecting the page.
   const isOwner = !!user?.isOwner;
   const gudangOptions = options?.warehouses ?? [];
   const activeGudangId = parseGudangTabValue(tab);
 
-  const scopedTransports = useMemo(
-    () =>
-      (data ?? []).filter(
-        (t) =>
-          activeGudangId == null ||
-          (t.gudangIds ?? []).includes(activeGudangId),
-      ),
-    [data, activeGudangId],
-  );
   const statusOptions = historyMode
     ? ["all", "ARRIVED", "COMPLETED", "CANCELLED"]
     : ["all", "PLANNED", "DEPARTED", "ARRIVED", "COMPLETED"];
@@ -138,54 +126,36 @@ export function TransportsPage({
     COMPLETED: "Selesai",
     CANCELLED: "Dibatalkan",
   };
+
+
+  const { data, meta, loading, reload, pagination, query } = usePagedApi<Transport>("/transports", { search, status: statusFilter, warehouseId: activeGudangId, history: historyMode, mine: historyMode || mineOnly }, can.view && tab !== "activity");
+  const rows = data ?? [];
   const overview = [
     {
       label: "Total transport",
-      count: scopedTransports.length,
+      count: (meta?.total ?? 0),
       icon: Route,
       tone: "bg-primary/10 text-primary",
     },
     {
       label: "Direncanakan",
-      count: scopedTransports.filter((t) => t.status === "PLANNED")
-        .length,
+      count: (meta?.statuses.PLANNED ?? 0),
       icon: Calendar,
       tone: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
     },
     {
       label: "Dalam perjalanan",
-      count: scopedTransports.filter((t) => t.status === "DEPARTED")
-        .length,
+      count: (meta?.statuses.DEPARTED ?? 0),
       icon: Truck,
       tone: "bg-blue-500/10 text-blue-700 dark:text-blue-400",
     },
     {
       label: "Menunggu konfirmasi",
-      count: scopedTransports.filter((t) => t.status === "ARRIVED")
-        .length,
+      count: (meta?.statuses.ARRIVED ?? 0),
       icon: CheckCircle2,
       tone: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
     },
   ];
-
-  const rows = useMemo(() => {
-    if (!data) return [];
-    const q = search.trim().toLowerCase();
-    return data.filter(
-      (t) =>
-        (statusFilter === "all" || t.status === statusFilter) &&
-        (activeGudangId == null ||
-          (t.gudangIds ?? []).includes(activeGudangId)) &&
-        (!q ||
-          t.transportCode.toLowerCase().includes(q) ||
-          (t.routeName ?? "").toLowerCase().includes(q) ||
-          t.vehicleNumber.toLowerCase().includes(q) ||
-          (t.origin ?? "").toLowerCase().includes(q) ||
-          (t.destination ?? "").toLowerCase().includes(q) ||
-          (t.driverName ?? "").toLowerCase().includes(q) ||
-          (t.kenekName ?? "").toLowerCase().includes(q)),
-    );
-  }, [data, search, statusFilter, activeGudangId]);
 
   function openCreate() {
     setEditing(null);
@@ -221,35 +191,51 @@ export function TransportsPage({
 
   /** Export the filtered transport list to CSV, including capacity status
    *  (overall + per-dimension) — for reporting / offline analysis. */
-  function exportCsv() {
-    const header = [
-      "kode", "status", "kendaraan", "rute", "koridor", "driver", "kenek",
-      "shipment_count", "total_koli", "total_berat_kg", "total_volume_m3", "total_harga",
-      "kapasitas_overall", "kapasitas_berat", "kapasitas_volume", "kapasitas_koli",
-      "rencana_berangkat", "rencana_tiba",
-    ];
-    const esc = (v: unknown) => {
-      const s = v == null ? "" : String(v);
-      return /["\n,]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const lines = rows.map((t) => [
-      t.transportCode, t.status, t.vehicleNumber, t.routeName ?? "",
-      `${t.origin ?? ""} → ${t.destination ?? ""}`,
-      t.driverName ?? "", t.kenekName ?? "",
-      t.shipmentCount, t.totalKoli ?? "", t.totalWeightKg, t.totalVolumeM3,
-      t.totalPrice ?? "",
-      t.capacity?.overallStatus ?? "",
-      t.capacity?.weight.status ?? "", t.capacity?.volume.status ?? "", t.capacity?.koli.status ?? "",
-      t.plannedDepartureAt ?? "", t.plannedArrivalAt ?? "",
-    ].map(esc).join(","));
-    const csv = [header.join(","), ...lines].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `transports-capacity-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  async function exportCsv() {
+    setExporting(true);
+    await runAction(async () => {
+      const header = [
+        "kode", "status", "kendaraan", "rute", "koridor", "driver", "kenek",
+        "shipment_count", "total_koli", "total_berat_kg", "total_volume_m3", "total_harga",
+        "kapasitas_overall", "kapasitas_berat", "kapasitas_volume", "kapasitas_koli",
+        "rencana_berangkat", "rencana_tiba",
+      ];
+      const esc = (v: unknown) => {
+        const s = v == null ? "" : String(v);
+        return /["\n,]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      // shortcut: CSV text stays in browser memory; stream exports when files become too large.
+      const lines: string[] = [];
+      let pages = 1;
+      let total: unknown;
+      for (let page = 1; page <= pages; page++) {
+        const response = await apiGetWithMeta<Transport[]>(`${query}&page=${page}&pageSize=100`);
+        if (!response.meta || response.meta.page !== page || (total !== undefined && response.meta.total !== total)) {
+          throw new Error("Data transport berubah. Silakan ulangi export.");
+        }
+        pages = Number(response.meta.pages);
+        total = response.meta.total;
+        lines.push(...response.data.map((t) => [
+          t.transportCode, t.status, t.vehicleNumber, t.routeName ?? "",
+          `${t.origin ?? ""} → ${t.destination ?? ""}`,
+          t.driverName ?? "", t.kenekName ?? "",
+          t.shipmentCount, t.totalKoli ?? "", t.totalWeightKg, t.totalVolumeM3,
+          t.totalPrice ?? "",
+          t.capacity?.overallStatus ?? "",
+          t.capacity?.weight.status ?? "", t.capacity?.volume.status ?? "", t.capacity?.koli.status ?? "",
+          t.plannedDepartureAt ?? "", t.plannedArrivalAt ?? "",
+        ].map(esc).join(",")));
+      }
+      const csv = [header.join(","), ...lines].join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `transports-capacity-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+    setExporting(false);
   }
 
   function renderActions(t: Transport) {
@@ -483,6 +469,7 @@ export function TransportsPage({
 
   const listTable = (
     <DataTable
+              pagination={pagination}
       rows={rows}
       loading={loading}
       renderCard={renderTransportCard}
@@ -547,10 +534,8 @@ export function TransportsPage({
                     {loading
                       ? "–"
                       : s === "all"
-                       ? scopedTransports.length
-                       : scopedTransports.filter(
-                          (t) => t.status === s,
-                        ).length}
+                       ? (meta?.total ?? 0)
+                       : (meta?.statuses[s] ?? 0)}
                   </span>
                 </Button>
               ))}
@@ -721,8 +706,8 @@ export function TransportsPage({
                 gudangName={user?.warehouseName ?? null}
               />
             )}
-            <Button variant="outline" size="sm" onClick={exportCsv} disabled={rows.length === 0}>
-              <Download className="h-4 w-4" /> Export CSV
+            <Button variant="outline" size="sm" onClick={exportCsv} disabled={loading || exporting || rows.length === 0}>
+              <Download className="h-4 w-4" /> {exporting ? "Mengexport…" : "Export CSV"}
             </Button>
             {can.create && !historyMode && (
               <Button onClick={openCreate} className="w-full sm:w-auto">
@@ -733,6 +718,7 @@ export function TransportsPage({
         }
       />
 
+      <p className="text-xs text-muted-foreground">Ringkasan sesuai filter aktif.</p>
       <section
         aria-label="Ringkasan transport"
         className="grid min-w-0 grid-cols-2 gap-3 lg:grid-cols-4"
@@ -791,7 +777,7 @@ export function TransportsPage({
               {activeW && (
                 <GudangTabBanner
                   gudangName={activeW.name}
-                  count={rows.length}
+                  count={meta?.total ?? 0}
                 />
               )}
               {listTable}

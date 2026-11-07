@@ -3,6 +3,7 @@ import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/shared/utils";
+import { Pagination, type PaginationProps } from "@/components/app/pagination";
 
 // ---------------------------------------------------------------------------
 // PageHeader — title + subtitle + action slot (the "Add" button lives here)
@@ -66,6 +67,7 @@ export function DataTable<T extends { id: number | string }>({
   renderCard,
   desktopBreakpoint = "md",
   viewMode = "responsive",
+  pagination,
 }: {
   columns: Column<T>[];
   rows: T[];
@@ -81,6 +83,7 @@ export function DataTable<T extends { id: number | string }>({
   desktopBreakpoint?: "md" | "xl";
   /** Override the automatic layout when the page offers a Table / Card switch. */
   viewMode?: "responsive" | "table" | "card";
+  pagination?: PaginationProps;
 }) {
   return (
     <div className="min-w-0 space-y-3">
@@ -103,7 +106,7 @@ export function DataTable<T extends { id: number | string }>({
         </div>
       )}
 
-      {loading ? (
+      {pagination?.error ? null : loading ? (
         <div className="space-y-2">
           {[0, 1, 2, 3].map((i) => (
             <Skeleton key={i} className="h-14 w-full rounded-xl" />
@@ -175,6 +178,7 @@ export function DataTable<T extends { id: number | string }>({
           </div>}
         </>
       )}
+      {pagination && <Pagination {...pagination} />}
     </div>
   );
 }

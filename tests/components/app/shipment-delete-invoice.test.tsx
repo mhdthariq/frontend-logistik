@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { mockPagedGet } from "../../support/paged-api";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ user: { isOwner: false, permissions: [] as string[] }, get: vi.fn(), delete: vi.fn() }));
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => ({ user: mocks.user }) }));
 vi.mock("@/infrastructure/http/client-api", async (original) => ({
-  ...await original<typeof import("@/infrastructure/http/client-api")>(), apiGet: mocks.get, apiDelete: mocks.delete,
+  ...await original<typeof import("@/infrastructure/http/client-api")>(), apiGet: mocks.get, apiGetWithMeta: (path: string) => mockPagedGet(mocks.get, path), apiDelete: mocks.delete,
 }));
 vi.mock("@/components/app/data-table", () => ({
   PageHeader: ({ title, actions }: { title: string; actions: React.ReactNode }) => <header>{title}{actions}</header>,

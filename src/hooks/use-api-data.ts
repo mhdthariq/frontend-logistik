@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 /** Simple data loader with manual refresh + error toast handling. */
-export function useApiData<T>(fetcher: () => Promise<T>, deps: unknown[] = []) {
+export function useApiData<T>(fetcher: (signal: AbortSignal) => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -23,11 +23,15 @@ export function useApiData<T>(fetcher: () => Promise<T>, deps: unknown[] = []) {
     setError(null);
     }
     const sequence = useRef(0);
+    const controller = useRef<AbortController | null>(null);
 
   const load = useCallback(() => {
     const id = ++sequence.current;
+    controller.current?.abort();
+    const nextController = new AbortController();
+    controller.current = nextController;
     // The async boundary also converts a synchronously throwing fetcher to a rejection.
-    const fetchData = async () => request.fetcher();
+    const fetchData = async () => request.fetcher(nextController.signal);
     return fetchData().then(
       (result) => {
         if (id !== sequence.current) return;
@@ -46,6 +50,7 @@ export function useApiData<T>(fetcher: () => Promise<T>, deps: unknown[] = []) {
         void load();
         return () => {
             sequence.current++;
+            controller.current?.abort();
         };
   }, [load]);
 

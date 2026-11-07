@@ -20,6 +20,7 @@ import {
   Warehouse,
 } from "lucide-react";
 import { useSearchParams } from "react-router";
+import { API_BASE_URL } from "@/infrastructure/http/api-base";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -134,7 +135,7 @@ function TrackingSession({ corporateId, code }: { corporateId: string; code: str
     setError(null);
     setData(null);
     try {
-      const response = await fetch(`/api/v1/public/track/${encodeURIComponent(code)}`, { method: "POST", headers: { "Content-Type": "application/json", "x-corp-id": corporateId }, body: JSON.stringify({ phone }), cache: "no-store" });
+      const response = await fetch(`${API_BASE_URL}/public/track/${encodeURIComponent(code)}`, { method: "POST", headers: { "Content-Type": "application/json", "x-corp-id": corporateId }, body: JSON.stringify({ phone }), cache: "no-store" });
       const payload = (await response.json().catch(() => null)) as { data?: TrackingResponse; message?: string } | null;
       if (!response.ok) {
         setError(payload?.message ?? `Resi tidak ditemukan (${response.status}).`);

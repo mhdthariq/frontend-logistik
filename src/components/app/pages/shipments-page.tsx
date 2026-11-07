@@ -1,3 +1,4 @@
+import { usePagedApi } from "@/hooks/use-paged-api";
 import { PasteFileInput } from "@/components/ui/paste-file-input";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -161,25 +162,25 @@ function ShipmentList() {
     viewLog: hasPermission(user, "audit_log.view"),
   };
 
-  const { data, loading, reload } = useApiData<Shipment[]>(() => apiGet<Shipment[]>("/shipments"), []);
-  const { data: options } = useApiData<Options>(() => apiGet<Options>("/options"), []);
-  // Gudang workspace (scope + live scan progress) — only loaded for users who
-  // can confirm arrivals, so the "Picked Up" rows can be scanned directly.
-  const { data: gudang, reload: reloadGudang } = useApiData<GudangWorkspace>(
-    () => (can.confirmArrival ? apiGet<GudangWorkspace>("/gudang") : Promise.resolve(null as unknown as GudangWorkspace)),
-    [can.confirmArrival],
-  );
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const { data: options } = useApiData<Options>(() => apiGet<Options>(`/options?include=${dialogOpen ? "customers,tariffs,warehouses" : "warehouses"}`), [dialogOpen]);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [customerTypeFilter, setCustomerTypeFilter] = useState("all");
   const [tab, setTab] = useState("regular");
-  const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState<ShipmentForm>(EMPTY_SHIPMENT);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<Shipment | null>(null);
   const [scanPickerOpen, setScanPickerOpen] = useState(false);
   const [rowScanTask, setRowScanTask] = useState<GudangArrivalQueueItem | null>(null);
   const [rowTransportTask, setRowTransportTask] = useState<GudangTransportArrivalItem | null>(null);
+
+  // Gudang workspace (scope + live scan progress) — only loaded for users who
+  // can confirm arrivals, so the "Picked Up" rows can be scanned directly.
+  const { data: gudang, reload: reloadGudang } = useApiData<GudangWorkspace>(
+    () => (can.confirmArrival && (scanPickerOpen || rowScanTask || rowTransportTask) ? apiGet<GudangWorkspace>("/gudang") : Promise.resolve(null as unknown as GudangWorkspace)),
+    [can.confirmArrival, scanPickerOpen, rowScanTask?.id, rowTransportTask?.id],
+  );
 
   // Owner per-gudang tabs (Regular | Direct | Gudang A | Gudang B | … | Log Aktivitas):
   // - "regular" = all STANDARD shipments (the existing flow).
@@ -193,37 +194,10 @@ function ShipmentList() {
   const isOwner = !!user?.isOwner;
   const gudangOptions = options?.warehouses ?? [];
   const activeGudangId = parseGudangTabValue(tab);
-  const isRegularTab = tab === "regular";
   const isDirectTab = tab === "direct";
 
-  const rows = useMemo(() => {
-    if (!data) return [];
-    const q = search.toLowerCase();
-    return data.filter(
-      (s) =>
-        (statusFilter === "all" || s.status === statusFilter) &&
-        (customerTypeFilter === "all" || s.customer?.type === customerTypeFilter) &&
-        // Revise round 8 — Fulfillment Mode filter:
-        //  - "regular" tab → only STANDARD
-        //  - "direct"  tab → only DIRECT
-        //  - per-gudang tab (owner) → only STANDARD + that gudang
-        //    (DIRECT shipments are NOT merged into per-gudang tabs)
-        (isRegularTab ? (s.fulfillmentMode ?? "STANDARD") === "STANDARD" : true) &&
-        (isDirectTab ? (s.fulfillmentMode ?? "STANDARD") === "DIRECT" : true) &&
-        (activeGudangId == null
-          ? true
-          : (s.gudangIds ?? []).includes(activeGudangId) &&
-            // per-gudang tab never includes DIRECT
-            (s.fulfillmentMode ?? "STANDARD") === "STANDARD") &&
-        (!q ||
-          s.masterCode.toLowerCase().includes(q) ||
-          (s.customer?.name ?? "").toLowerCase().includes(q) ||
-          (s.customer?.companyName ?? "").toLowerCase().includes(q) ||
-          s.origin.toLowerCase().includes(q) ||
-          s.destination.toLowerCase().includes(q) ||
-          (s.penerimaName ?? "").toLowerCase().includes(q)),
-    );
-  }, [data, search, statusFilter, customerTypeFilter, activeGudangId, isRegularTab, isDirectTab]);
+  const { data, meta, loading, reload, pagination } = usePagedApi<Shipment>("/shipments", { search, status: statusFilter, customerType: customerTypeFilter, fulfillmentMode: isDirectTab ? "DIRECT" : "STANDARD", warehouseId: activeGudangId }, can.view && tab !== "activity");
+  const rows = data ?? [];
 
   /** Auto-pick Gudang Asal & Gudang Tujuan from the selected rute (tariff):
    *  the warehouse whose city matches the tariff's origin/destination is
@@ -443,12 +417,13 @@ function ShipmentList() {
         }
       />
 
+      <p className="text-xs text-muted-foreground">Ringkasan sesuai filter aktif.</p>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4" aria-label="Ringkasan shipment">
         {[
-          { label: "Total Shipment", count: data?.length ?? 0 },
-          { label: "Dalam Perjalanan", count: data?.filter((s) => ["PICKED_UP", "IN_TRANSPORT"].includes(s.status)).length ?? 0 },
-          { label: "Terkirim", count: data?.filter((s) => s.status === "DELIVERED").length ?? 0 },
-          { label: "Belum Dihitung", count: data?.filter((s) => s.priceAmount == null && s.status !== "CANCELLED").length ?? 0 },
+          { label: "Total Shipment", count: meta?.total ?? 0 },
+          { label: "Dalam Perjalanan", count: (meta?.statuses.PICKED_UP ?? 0) + (meta?.statuses.IN_TRANSPORT ?? 0) },
+          { label: "Terkirim", count: meta?.statuses.DELIVERED ?? 0 },
+          { label: "Belum Dihitung", count: meta?.unpriced ?? 0 },
         ].map((item) => (
           <div key={item.label} className="rounded-2xl border bg-card p-4 shadow-sm sm:p-5">
             <p className="text-xs font-medium text-muted-foreground">{item.label}</p>
@@ -495,6 +470,7 @@ function ShipmentList() {
                 </p>
               )}
               <OperationalTable
+              pagination={pagination}
             rows={rows}
             loading={loading}
             search={search}

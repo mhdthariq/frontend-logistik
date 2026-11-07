@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { mockPagedGet } from "../../support/paged-api";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => ({ user: { permissions: mocks.permissions, isOwner: false } }) }));
 vi.mock("@/infrastructure/http/client-api", async (original) => ({
   ...await original<typeof import("../../../src/infrastructure/http/client-api")>(),
-  apiGet: mocks.get, apiPost: mocks.post, apiPut: mocks.put, apiDelete: mocks.remove, apiFetch: mocks.fetch,
+  apiGet: mocks.get, apiGetWithMeta: (path: string) => mockPagedGet(mocks.get, path), apiPost: mocks.post, apiPut: mocks.put, apiDelete: mocks.remove, apiFetch: mocks.fetch,
 }));
 vi.mock("@/components/app/resi-print", () => ({ ResiPrint: () => null }));
 vi.mock("@/components/app/item-audit-dialog", () => ({ ItemAuditDialog: () => null }));
@@ -35,7 +36,7 @@ beforeEach(() => {
   window.location.hash = "#/shipments";
   shipment = { id: 7, masterCode: "SHP-7", status: "CREATED", fulfillmentMode: "STANDARD", origin: "A", destination: "B", createdAt: "2026-10-01", details: [detail, { ...detail, id: 12, detailCode: "DTL-12" }], trackingEvents: [] };
   mocks.get.mockImplementation(async (path: string) => {
-    if (path === "/options") return { customers: [{ id: 1, name: "Sender", type: "regular", code: "C1" }], tariffs: [{ id: 2, origin: "A", destination: "B", customerType: "regular", ratePerKg: 1000, effectiveFrom: "2020-01-01", effectiveTo: null, isActive: true }], warehouses: [] };
+    if (path.startsWith("/options")) return { customers: [{ id: 1, name: "Sender", type: "regular", code: "C1" }], tariffs: [{ id: 2, origin: "A", destination: "B", customerType: "regular", ratePerKg: 1000, effectiveFrom: "2020-01-01", effectiveTo: null, isActive: true }], warehouses: [] };
     if (path === "/gudang") return { scope: { scoped: false }, arrivals: [], transportArrivals: [] };
     if (path === "/shipments") return [];
     return shipment;

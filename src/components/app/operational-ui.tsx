@@ -60,6 +60,7 @@ export function OperationalTable<T extends { id: number | string }>({ columns, .
   onSearchChange?: (value: string) => void;
   searchPlaceholder?: string;
   toolbar?: ReactNode;
+  pagination?: import("@/components/app/pagination").PaginationProps;
 }) {
   return <div className="min-w-0 space-y-3 rounded-2xl border bg-card p-3 shadow-sm sm:p-5 [&_input]:min-h-11 [&_input]:rounded-xl">
     <DataTable {...props} columns={columns} desktopBreakpoint="xl" renderCard={(row) => {

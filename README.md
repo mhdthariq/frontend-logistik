@@ -36,10 +36,27 @@ mode, production uses `NODE_ENV=production`, and preview also sets
 `PREVIEW_MODE=true`. Vite environment values are fixed at build time.
 
 Only public settings belong in `VITE_*`. Database and licensing credentials
-stay exclusively in the backend environment. Keep `GO_API_ORIGIN` out of
-`VITE_*`; the browser always calls the same-origin `/api/v1` URLs.
+stay exclusively in the backend environment. `GO_API_ORIGIN` configures only
+the Vite development/preview proxy.
 
 ## Deployment
+
+To choose the backend for browser requests, set this in `frontend/.env` before
+building (use your backend's HTTPS domain, without `/api`):
+
+```dotenv
+VITE_API_ORIGIN=https://api.your-domain.com
+```
+
+Rebuild and redeploy the frontend after changing it. This public value is compiled
+into `dist/`; uploading an `.env` beside an existing build does not change it.
+When the API uses a different origin, set `CORS_ALLOW_ORIGINS` in the backend's
+process environment to a comma-separated list of frontend origins, for example
+`http://localhost:3000,https://app.your-domain.com`, then restart the backend.
+The Go backend handles OPTIONS requests and permits Authorization, Content-Type,
+and x-corp-id headers for those origins.
+Leave `VITE_API_ORIGIN` empty to keep same-origin `/api` requests and the reverse
+proxy configurations below. No backend credentials belong in the frontend `.env`.
 
 For Vercel, select `frontend/` as the project root. The included `vercel.json`
 forwards `/api` to the deployed backend and serves the SPA for frontend routes.

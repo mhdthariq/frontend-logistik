@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { mockPagedGet } from "../../support/paged-api";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -9,7 +10,7 @@ import { ReturnTasksPage } from "@/components/app/pages/return-tasks-page";
 const m = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), permissions: [] as string[] }));
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => ({ user: { permissions: m.permissions, isOwner: false } }) }));
 vi.mock("@/infrastructure/http/client-api", async (original) => ({
-  ...await original<typeof import("@/infrastructure/http/client-api")>(), apiGet: m.get, apiPost: m.post,
+  ...await original<typeof import("@/infrastructure/http/client-api")>(), apiGet: m.get, apiGetWithMeta: (path: string) => mockPagedGet(m.get, path), apiPost: m.post,
 }));
 vi.mock("@/components/app/item-audit-dialog", () => ({ ItemAuditDialog: () => null }));
 vi.mock("@/components/app/qr-scan-dialog", () => ({ QrScanDialog: ({ open, task }: { open: boolean; task: { code: string } | null }) => open ? <div role="dialog" aria-label="Scan task">{task?.code}</div> : null }));
@@ -20,7 +21,7 @@ beforeEach(() => {
   m.permissions = ["pickup.view", "pickup.scan", "delivery.view", "delivery.scan", "return-task.view", "return-task.approve"];
   m.post.mockResolvedValue({});
   m.get.mockImplementation(async (path: string) => {
-    if (path === "/options") return { warehouses: [], employees: [{ id: 2, name: "Budi", position: "Kurir" }] };
+    if (path.startsWith("/options")) return { warehouses: [], employees: [{ id: 2, name: "Budi", position: "Kurir" }] };
     if (path.startsWith("/pickups")) return [{ ...task, pickupCode: "PUP-1", pickupAddress: "Jalan Merdeka 10" }];
     if (path.startsWith("/deliveries")) return [{ ...task, deliveryCode: "DLV-1", address: "Jalan Sudirman 20" }];
     if (path.startsWith("/return-tasks")) return [{ id: 1, returnTaskCode: "RT-1", status: "CREATED", origin: "Banda Aceh", destination: "Medan", vehicleNumber: "BK-1234", originalTransportId: 4, originalTransportCode: "TRP-4", createdAt: "2026-10-17" }];

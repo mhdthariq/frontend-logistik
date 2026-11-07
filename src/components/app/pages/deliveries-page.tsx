@@ -1,3 +1,4 @@
+import { usePagedApi } from "@/hooks/use-paged-api";
 
 import { useEffect, useMemo, useState } from "react";
 import { Camera, CheckCircle2, ClipboardList, PackageCheck, Pencil, Plus, QrCode, XCircle } from "lucide-react";
@@ -46,12 +47,18 @@ export function DeliveriesPage() {
   // Kurir executor view: without assign capability, only show my own tasks.
   const isExecutor = !can.assign && !user?.isOwner;
 
-  const { data, loading, reload } = useApiData<DeliveryTask[]>(() => apiGet<DeliveryTask[]>(`/deliveries${isExecutor ? "?mine=true" : ""}`), [isExecutor]);
-  const { data: options } = useApiData<Options>(() => apiGet<Options>("/options"), []);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [tab, setTab] = useState("list");
+  const activeGudangId = parseGudangTabValue(tab);
+  const { data, meta, loading, reload, pagination } = usePagedApi<DeliveryTask>("/deliveries", { search, status: statusFilter, warehouseId: activeGudangId, mine: isExecutor }, can.view && tab !== "activity");
+  const rows = data ?? [];
+  const [createOpen, setCreateOpen] = useState(false);
+  const { data: options } = useApiData<Options>(() => apiGet<Options>("/options?include=employees,warehouses"), []);
   const [readyShipments, setReadyShipments] = useState<Shipment[]>([]);
 
   useEffect(() => {
-    if (!can.assign) return;
+    if (!can.assign || !createOpen) return;
     Promise.all([
       apiGet<Shipment[]>("/shipments?status=ARRIVED_AT_GUDANG"),
       apiGet<Shipment[]>("/shipments?status=AT_DEST_GUDANG"),
@@ -59,12 +66,8 @@ export function DeliveriesPage() {
     ])
       .then(([a, d, r]) => setReadyShipments([...a, ...d, ...r]))
       .catch(() => undefined);
-  }, [can.assign, data]);
+  }, [can.assign, createOpen]);
 
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [tab, setTab] = useState("list");
-  const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<DeliveryTask | null>(null);
   const [detailTarget, setDetailTarget] = useState<DeliveryTask | null>(null);
   const [scanTask, setScanTask] = useState<ScanTaskInfo | null>(null);
@@ -77,22 +80,12 @@ export function DeliveriesPage() {
   const [confirmDelete, setConfirmDelete] = useState<DeliveryTask | null>(null);
 
   // Owner per-gudang tabs (Daftar | Gudang A | Gudang B | … | Log Aktivitas):
-  // filter the fetched rows to the selected gudang. Non-owner users only
+  // filter in the API before selecting the page. Non-owner users only
   // ever receive their own gudang's data from the API.
   const isOwner = !!user?.isOwner;
   const gudangOptions = options?.warehouses ?? [];
-  const activeGudangId = parseGudangTabValue(tab);
 
-  const rows = useMemo(() => {
-    if (!data) return [];
-    const q = search.toLowerCase();
-    return data.filter(
-      (d) =>
-        (statusFilter === "all" || d.status === statusFilter) &&
-        (activeGudangId == null || (d.gudangIds ?? []).includes(activeGudangId)) &&
-        (!q || d.deliveryCode.toLowerCase().includes(q) || d.masterCode.toLowerCase().includes(q) || d.customerName.toLowerCase().includes(q)),
-    );
-  }, [data, search, statusFilter, activeGudangId]);
+
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -182,11 +175,12 @@ export function DeliveriesPage() {
           </>
         }
       />
+      <p className="text-xs text-muted-foreground">Ringkasan sesuai filter aktif.</p>
       <OperationalSummary loading={loading} items={[
-        { label: "Total Tugas", value: data?.length ?? 0 },
-        { label: "Ditugaskan", value: data?.filter((task) => task.status === "ASSIGNED").length ?? 0 },
-        { label: "Dalam Proses", value: data?.filter((task) => task.status === "DELIVERED").length ?? 0 },
-        { label: "Selesai", value: data?.filter((task) => task.status === "COMPLETED").length ?? 0 },
+        { label: "Total Tugas", value: meta?.total ?? 0 },
+        { label: "Ditugaskan", value: meta?.statuses.ASSIGNED ?? 0 },
+        { label: "Dalam Proses", value: meta?.statuses.DELIVERED ?? 0 },
+        { label: "Selesai", value: meta?.statuses.COMPLETED ?? 0 },
       ]} />
 
 
@@ -209,8 +203,9 @@ export function DeliveriesPage() {
           const activeW = gudangOptions.find((g) => gudangTabValue(g.id) === v) ?? null;
           return (
             <TabsContent key={v} value={v} className="mt-3 space-y-3">
-              {activeW && <GudangTabBanner gudangName={activeW.name} count={rows.length} />}
+              {activeW && <GudangTabBanner gudangName={activeW.name} count={meta?.total ?? 0} />}
               <OperationalTable
+              pagination={pagination}
             rows={rows}
             loading={loading}
             search={search}

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { mockPagedGet } from "../../support/paged-api";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -6,7 +7,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 const m = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), billed: false }));
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => ({ user: { isOwner: true } }) }));
 vi.mock("@/infrastructure/http/client-api", async original => ({
-  ...await original<typeof import("@/infrastructure/http/client-api")>(), apiGet: m.get, apiPost: m.post,
+  ...await original<typeof import("@/infrastructure/http/client-api")>(), apiGet: m.get, apiGetWithMeta: (path: string) => mockPagedGet(m.get, path), apiPost: m.post,
 }));
 vi.mock("@/components/app/form-parts", async original => ({
   ...await original<typeof import("@/components/app/form-parts")>(),
@@ -19,7 +20,7 @@ import { InvoicesPage } from "@/components/app/pages/invoices-page";
 beforeEach(() => {
   vi.clearAllMocks();
   m.billed = false;
-  m.get.mockImplementation(async (path: string) => path === "/options" ? {
+  m.get.mockImplementation(async (path: string) => path.startsWith("/options") ? {
     customers: [{ id: 2, name: "Customer", companyName: "Company", type: "b2b" }],
     b2bShipments: [{ id: 3, masterCode: "MS-3", customerId: 2, origin: "Jakarta", destination: "Bandung", priceAmount: 100, invoiceLines: m.billed ? [{ invoice: { id: 1 } }] : [] }],
   } : []);

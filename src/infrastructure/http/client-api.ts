@@ -1,5 +1,7 @@
 "use client";
 
+import { API_BASE_URL } from "./api-base";
+
 /**
  * Typed API client for the /api/v1 backend. Token stored in localStorage,
  * Bearer auth, envelope handling, consistent error shape.
@@ -80,7 +82,7 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
     body = JSON.stringify(options.body);
   }
 
-  const response = await fetch(`/api/v1${path}`, {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
     method: options.method ?? (body !== undefined ? "POST" : "GET"),
     headers,
     body,
@@ -109,9 +111,9 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
 }
 
 /** Like apiGet but also exposes the envelope `meta` (pagination / filter options). */
-export async function apiGetWithMeta<T>(path: string): Promise<{ data: T; meta: Record<string, unknown> | undefined }> {
+export async function apiGetWithMeta<T>(path: string, signal?: AbortSignal): Promise<{ data: T; meta: Record<string, unknown> | undefined }> {
   const headers = authHeaders();
-  const response = await fetch(`/api/v1${path}`, { headers, cache: "no-store" });
+  const response = await fetch(`${API_BASE_URL}${path}`, { headers, cache: "no-store", signal });
   const payload = (await response.json().catch(() => null)) as
     | { data?: T; meta?: Record<string, unknown>; message?: string; code?: string }
     | null;

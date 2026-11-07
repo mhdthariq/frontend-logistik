@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { mockPagedGet } from "../../support/paged-api";
 import { render, screen, waitFor, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -9,7 +10,7 @@ import type { TransportDetail } from "@/infrastructure/http/client-api";
 
 const m = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), remove: vi.fn(), owner: true, permissions: [] as string[] }));
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => ({ user: { name: "Andi", isOwner: m.owner, employeeId: null, roles: [{ slug: "owner" }], permissions: m.permissions }, companyName: "KirimKu" }) }));
-vi.mock("@/infrastructure/http/client-api", () => ({ apiGet: m.get, apiPost: m.post, apiPut: m.put, apiDelete: m.remove, hasPermission: (_: unknown, permission: string) => m.owner || m.permissions.includes(permission) }));
+vi.mock("@/infrastructure/http/client-api", () => ({ apiGet: m.get, apiGetWithMeta: (path: string) => mockPagedGet(m.get, path), apiPost: m.post, apiPut: m.put, apiDelete: m.remove, hasPermission: (_: unknown, permission: string) => m.owner || m.permissions.includes(permission) }));
 vi.mock("@/components/app/transport-map", () => ({ TransportMap: () => null }));
 vi.mock("@/components/app/transport-form-dialog", () => ({ TransportFormDialog: () => null }));
 vi.mock("@/components/app/checkpoint-checkin-dialog", () => ({ CheckpointCheckinDialog: () => null }));
@@ -54,7 +55,7 @@ beforeEach(() => {
     if (url.endsWith("/operational-expenses")) return { rows, approvedTotal: 500_000, pendingTotal: 9_999_999_999 };
     if (url.endsWith("/expenses")) return rows.map(row => ({ ...row, transportId: 10, hasPhoto: false }));
     if (url.endsWith("/drops")) return { transportMode: "DIRECT", transportStatus: "DEPARTED", shipments: [], checkpoints: [], groups: [], progress: { total: 0, dropped: 0, approved: 0 } };
-    if (url === "/options") return { customers: [{ id: 1, name: "Customer", companyName: "Customer", type: "b2b" }], b2bShipments: [] };
+    if (url.startsWith("/options")) return { customers: [{ id: 1, name: "Customer", companyName: "Customer", type: "b2b" }], b2bShipments: [] };
     if (url === "/invoices") return [invoice];
     if (url === "/invoices/1") return invoice;
     if (url === "/transports/10") return transport;

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { mockPagedGet } from "../../support/paged-api";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -6,7 +7,7 @@ import type { ReactNode } from "react";
 const m = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), permissions: [] as string[], user: { id: 1, isOwner: false, roles: [] as { slug: string }[] } }));
 vi.mock("@/hooks/use-auth", () => ({ useAuth: () => ({ user: m.user }) }));
 vi.mock("@/infrastructure/http/client-api", () => ({
-  apiGet: m.get, apiPost: m.post, apiDelete: vi.fn(),
+  apiGet: m.get, apiGetWithMeta: (path: string) => mockPagedGet(m.get, path), apiPost: m.post, apiDelete: vi.fn(),
   hasPermission: (_user: unknown, permission: string) => m.permissions.includes(permission),
 }));
 vi.mock("@/components/app/data-table", () => ({
@@ -33,7 +34,7 @@ beforeEach(() => {
     id: i + 1, transportCode: `TRP-${i + 1}`, status, vehicleNumber: "BK-1", vehicleOwnerId: 3,
     shipments: [], settlement: null, routeCheckpoints: [],
   }));
-  m.get.mockImplementation(async (url: string) => url === "/options" ? { warehouses: [] } : rows);
+  m.get.mockImplementation(async (url: string) => url.startsWith("/options") ? { warehouses: [] } : rows);
 });
 
 describe("transport list completion actions", () => {
@@ -52,7 +53,7 @@ describe("transport list completion actions", () => {
 
   it("opens only confirmation for a photo-exempt activity arrival from the list", async () => {
     m.permissions.push("transport.arrive_without_photo");
-    m.get.mockImplementation(async (url: string) => url === "/options" ? { warehouses: [] } : [{
+    m.get.mockImplementation(async (url: string) => url.startsWith("/options") ? { warehouses: [] } : [{
       id: 1, transportCode: "TRP-1", status: "DEPARTED", trackingMode: "ACTIVITY", vehicleNumber: "BK-1",
       shipments: [], settlement: null, routeCheckpoints: [],
     }]);
@@ -94,7 +95,7 @@ describe("transport list completion actions", () => {
     render(<TransportsPage historyMode={historyMode} />);
     await screen.findByTestId("trip-3");
     fireEvent.click(screen.getByRole("button", { name: /^Selesai/ }));
-    expect(screen.getByTestId("trip-3")).toBeInTheDocument();
+    expect(await screen.findByTestId("trip-3")).toBeInTheDocument();
     expect(screen.queryByTestId("trip-2")).not.toBeInTheDocument();
     expect(screen.queryByTestId("trip-1")).not.toBeInTheDocument();
   });

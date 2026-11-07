@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { mockPagedGet } from "../../support/paged-api";
 import {
     fireEvent,
     render,
@@ -22,7 +23,7 @@ vi.mock("@/hooks/use-auth", () => ({
 }));
 vi.mock("@/infrastructure/http/client-api", async (original) => ({
     ...(await original<typeof import("@/infrastructure/http/client-api")>()),
-    apiGet: m.get,
+    apiGet: m.get, apiGetWithMeta: (path: string) => mockPagedGet(m.get, path),
     apiPost: m.post,
     apiPut: m.put,
     apiDelete: m.remove,
